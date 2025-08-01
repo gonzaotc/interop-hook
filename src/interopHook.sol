@@ -19,11 +19,11 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 /// taking advantage of the 1-block latency to achieve real-time cross-chain swaps.
 ///
 /// This cross-chain pool is replicated and interoperable across all the chains where it is deployed.
-/// Note that even tough this same code is deployed across all chains, there are two different
-/// instances classes of the hook: the canonical (stateful) chain and the proxy (stateless) chains.
+/// Note that even tough this same contract code is deployed across all chains, there are two different
+/// classes of pools: the canonical (stateful) pool and the proxy (stateless) pools.
 ///
-/// For capital efficiency, one chain holds all liquidity (canonical), while others act as
-/// routing proxies that forward swaps to the canonical chain.
+/// For capital efficiency, one pool in one chain holds all liquidity (canonical), while others act as
+/// liquidity consumers that forward swaps to the canonical pool.
 ///
 /// Requirements:
 /// - Chains must be part of the Superchain cluster.
@@ -44,13 +44,13 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 /// - Cross-chain messages can be relayed in the wrong order, which can be solved by implementing a
 ///   mechanism for asynchronous cross-chain messages such as
 ///   https://github.com/ethereum-optimism/interop-lib/blob/main/src/Promise.sol OR
-///   by improving the SuperchainTokenBridge to allow to "bridge and execute", which would ensure
+///   by improving the SuperchainTokenBridge to allow to "sendERC20AndExecute", which would ensure
 ///   message execution atomicity and correct order.
 ///
 /// - The SuperchainTokenBridge is limited such that bridges can only by initialized by the token holder,
 ///   therefore, the hook must hold the user token in order to bridge them. This applies in the
-///   origin chain to start the swap and in the destination chain to return the output tokens.
-///   The SuperchainTokenBridge could be imported to allow "sendERC20From", which would require the 
+///   origin chain to start the swap but also in the destination chain to return the output tokens.
+///   The SuperchainTokenBridge could be improved to include "sendERC20From", which would require the 
 ///   "ERC20Burneable" extension in order to give "burn allowance" to the bridge.
 ///
 ///
