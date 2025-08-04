@@ -3,7 +3,6 @@ pragma solidity ^0.8.27;
 
 // Externals
 import {BaseHook} from "@openzeppelin/uniswap-hooks/base/BaseHook.sol";
-import {CrossDomainSelfBridgeable} from "./CrossDomainSelfBridgeable.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
@@ -14,6 +13,11 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import {CurrencySettler} from "@openzeppelin/uniswap-hooks/utils/CurrencySettler.sol";
+
+// Internals
+import {CrossDomainSelfBridgeable} from "src/CrossDomainSelfBridgeable.sol";
+
 
 /// @dev A hook that converts a fragmented one-chain pool into a cross-chain pool in the Superchain cluster,
 /// taking advantage of the 1-block latency to achieve real-time cross-chain swaps.
@@ -28,38 +32,41 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 /// Requirements:
 /// - Chains must be part of the Superchain cluster.
 /// - Tokens must be ERC-7802 compliant for cross-chain bridging.
-/// - Uses the SuperchainTokenBridge predeploy for trust-minimized bridging.
-/// - Requires the same contract address on all chains for cross-domain authentication.
+/// - Depends on the SuperchainTokenBridge predeploy for trust-minimized bridging.
+/// - Requires this hook address to be the same on all chains for cross-domain authentication.
 ///
 /// Limitations:
 ///
 /// - Only exactInput swaps are supported since the input must be bridged prior to the swap.
 ///
-/// - Altrough slippage protection is achievable, it's gas costs are high. Specifically,
-///   a failed swap due to slippage would incur in the gas costs for bridging A->B, B swap fail, and B->A
+/// - Although slippage protection is achievable, gas costs are high. Specifically, a swap reverted due to slippage
+///   would incur in the gas costs for bridging A->B, B swap reverting, and bridging back B->A.
 ///
-/// - Cross-chain messages can fail to be relayed, which can be solved by using a reliable network of
+/// - Cross-chain messages must be relayed, which can be solved by using a reliable network of
 ///   cross-domain message relayers.
 ///
-/// - Cross-chain messages can be relayed in the wrong order, which can be solved by implementing a
-///   mechanism for asynchronous cross-chain messages such as
+/// - Cross-chain messages can be potentially relayed in the wrong order, which can be solved by implementing a 
+///   mechanism for chained asynchronous cross-chain messages such as
 ///   https://github.com/ethereum-optimism/interop-lib/blob/main/src/Promise.sol OR
-///   by improving the SuperchainTokenBridge to allow to "sendERC20AndExecute", which would ensure
+///   by improving the SuperchainTokenBridge by adding a "sendERC20AndExecute", which would ensure
 ///   message execution atomicity and correct order.
 ///
-/// - The SuperchainTokenBridge is limited such that bridges can only by initialized by the token holder,
-///   therefore, the hook must hold the user token in order to bridge them. This applies in the
-///   origin chain to start the swap but also in the destination chain to return the output tokens.
-///   The SuperchainTokenBridge could be improved to include "sendERC20From", which would require the 
-///   "ERC20Burneable" extension in order to give "burn allowance" to the bridge.
+/// - The SuperchainTokenBridge is currently limited in such a way that bridging requests can only be initialized
+///   by the token holder, therefore, the hook must hold the user token in order to bridge them. Note that this
+///   applies in the origin chain to start the swap but also in the destination chain to return the output tokens.
+///   As an optimization, the SuperchainTokenBridge could be improved to include a "sendERC20From", which would
+///   require the "ERC20Burneable" extension in order to give "burn allowance" to this hook.
 ///
+/// - We need to figure out how to return the tokens to the user instead of bridging them back to the hook.
 ///
 contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable {
     using SafeCast for *;
+    using CurrencySettler for Currency;
 
     /// @dev Thrown if the swap is an exactOutput swap
     error ExactOutputCrosschainSwapUnsupported();
 
+    /// @dev The data returned by the PoolManager to resolve a cross-chain swap request.
     struct CrosschainSwapCallbackData {
         uint256 originChainId;
         PoolKey key;
@@ -120,12 +127,16 @@ contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable {
         // determine the tokenIn
         Currency tokenIn = (params.zeroForOne) ? key.currency0 : key.currency1;
 
+        // take the user's tokens to the hook
+        CurrencySettler.take(tokenIn, poolManager, msg.sender, params.amountSpecified.toUint256(), false);
+
         // bridge the input tokens to the canonical chain instance of this hook
-        // @TBD The hook must hold the tokens in order to be able to bridge them!
+        // #cross-domain-message #1
         _bridge(Currency.unwrap(tokenIn), address(this), params.amountSpecified.toUint256(), CANONICAL_CHAIN_ID);
 
         // send cross-chain message to resolve the swap
-        // @TBD if this message gets resolved before the bridge message, the swap will fail.
+        // @TBD if this message gets resolved before #cross-domain-message #1, the swap will fail.
+        // #cross-domain-message #2
         bytes memory message = abi.encodeCall(this.resolveCrosschainSwap, (key, params));
         messenger.sendMessage(CANONICAL_CHAIN_ID, address(this), message);
     }
@@ -158,11 +169,13 @@ contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable {
 
         // bridge the output tokens back to the origin chain
         // @TBD if we return `tokenOut` directly, we are loosing the slippage protection entirely.
-        // @TBD we can return the tokens to this hook instance, but they should go to the user.
+        // @TBD we need to figure out how to return the tokens to the user instead of bridging them back to the hook.
+        // #cross-domain-message #3
         _bridge(Currency.unwrap(tokenOut), address(this), amountOut.toUint256(), callbackData.originChainId);
 
         return abi.encode(delta);
     }
+
 
     // @inheritdoc BaseHook
     function getHookPermissions() public pure virtual override returns (Hooks.Permissions memory permissions) {
