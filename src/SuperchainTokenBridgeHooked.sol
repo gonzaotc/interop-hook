@@ -15,8 +15,16 @@ import {ISuperchainTokenBridgeHooks} from "./ISuperchainTokenBridgeHooks.sol";
 import {ISuperchainTokenBridgeHooked} from "./ISuperchainTokenBridgeHooked.sol";
 
 // @title SuperchainTokenBridgeHooked (Draft)
-// @notice Extension of the SuperchainTokenBridge that allows to execute code at different points
-// of bridging process lifecycle.
+// @notice Extension of the SuperchainTokenBridge that allows to execute callbacks at predefined points
+// of the bridging process lifecycle (defined as hooks).
+//
+// @dev This iteration enables developers to easily perform sincronously chained actions such as
+// "bridge and then execute", "execute and then bridge", "execute, bridge, and then execute",
+// that otherwise would need to be handled asynchonously by sending multiple cross-chain messages and 
+// ensuring a correct order of relaying and execution.
+//
+// Note that "beforeRelayERC20" and "afterRelayERC20" seems to cover most of the use cases, but others may also be fit.
+//
 contract SuperchainTokenBridgeHooked is SuperchainTokenBridge, ISuperchainTokenBridgeHooked {
     using BridgeHooksLib for BridgeHooksLib.HooksData;
 
