@@ -17,7 +17,7 @@ import {CurrencySettler} from "@openzeppelin/uniswap-hooks/utils/CurrencySettler
 
 // Internals
 import {CrossDomainSelfBridgeable} from "src/CrossDomainSelfBridgeable.sol";
-
+import {BridgeHooks, ISuperchainTokenBridgeHooks} from "src/BridgeHooksLib.sol";
 
 /// @dev A hook that converts a fragmented one-chain pool into a cross-chain pool in the Superchain cluster,
 /// taking advantage of the 1-block latency to achieve real-time cross-chain swaps.
@@ -45,7 +45,7 @@ import {CrossDomainSelfBridgeable} from "src/CrossDomainSelfBridgeable.sol";
 /// - Cross-chain messages must be relayed, which can be solved by using a reliable network of
 ///   cross-domain message relayers.
 ///
-/// - Cross-chain messages can be potentially relayed in the wrong order, which can be solved by implementing a 
+/// - Cross-chain messages can be potentially relayed in the wrong order, which can be solved by implementing a
 ///   mechanism for chained asynchronous cross-chain messages such as
 ///   https://github.com/ethereum-optimism/interop-lib/blob/main/src/Promise.sol OR
 ///   by improving the SuperchainTokenBridge by adding a "sendERC20AndExecute", which would ensure
@@ -59,7 +59,7 @@ import {CrossDomainSelfBridgeable} from "src/CrossDomainSelfBridgeable.sol";
 ///
 /// - We need to figure out how to return the tokens to the user instead of bridging them back to the hook.
 ///
-contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable {
+contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable, ISuperchainTokenBridgeHooks {
     using SafeCast for *;
     using CurrencySettler for Currency;
 
@@ -68,7 +68,6 @@ contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable {
 
     /// @dev The data returned by the PoolManager to resolve a cross-chain swap request.
     struct CrosschainSwapCallbackData {
-        uint256 originChainId;
         PoolKey key;
         SwapParams params;
     }
@@ -130,28 +129,28 @@ contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable {
         // take the user's tokens to the hook
         CurrencySettler.take(tokenIn, poolManager, msg.sender, params.amountSpecified.toUint256(), false);
 
+        bytes memory hookData = abi.encode(CrosschainSwapCallbackData(key, params));
+
         // bridge the input tokens to the canonical chain instance of this hook
         // #cross-domain-message #1
-        _bridge(Currency.unwrap(tokenIn), address(this), params.amountSpecified.toUint256(), CANONICAL_CHAIN_ID);
-
-        // send cross-chain message to resolve the swap
-        // @TBD if this message gets resolved before #cross-domain-message #1, the swap will fail.
-        // #cross-domain-message #2
-        bytes memory message = abi.encodeCall(this.resolveCrosschainSwap, (key, params));
-        messenger.sendMessage(CANONICAL_CHAIN_ID, address(this), message);
+        _bridge(
+            Currency.unwrap(tokenIn), address(this), params.amountSpecified.toUint256(), CANONICAL_CHAIN_ID, hookData
+        );
     }
 
-    /// @dev Resolves a cross-chain swap by performing the swap on the canonical chain and
-    /// returning the output tokens to the proxy chain.
-    function resolveCrosschainSwap(PoolKey calldata key, SwapParams calldata params)
-        external
-        onlyCrossDomainMessenger
-        onlyCrossDomainSelf
-        returns (BalanceDelta delta)
-    {
-        uint256 originChainId = messenger.crossDomainMessageSource();
+    function afterRelayERC20(
+        address _token,
+        address _from,
+        address _to,
+        uint256 _amount,
+        uint256 _source,
+        bytes calldata _hookData
+    ) external onlySuperchainTokenBridge {
+        CrosschainSwapCallbackData memory callbackData = abi.decode(_hookData, (CrosschainSwapCallbackData));
+
         delta = abi.decode(
-            poolManager.unlock(abi.encode(CrosschainSwapCallbackData(originChainId, key, params))), (BalanceDelta)
+            poolManager.unlock(abi.encode(CrosschainSwapCallbackData(_source, callbackData.key, callbackData.params))),
+            (BalanceDelta)
         );
     }
 
@@ -175,7 +174,6 @@ contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable {
 
         return abi.encode(delta);
     }
-
 
     // @inheritdoc BaseHook
     function getHookPermissions() public pure virtual override returns (Hooks.Permissions memory permissions) {

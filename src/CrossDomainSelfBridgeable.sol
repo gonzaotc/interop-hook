@@ -17,13 +17,16 @@ contract CrossDomainSelfBridgeable {
     // @dev Thrown if the caller is not the cross-domain self
     error OnlyCrossDomainSelf();
 
+    // @dev Thrown if the caller is not the SuperchainTokenBridge
+    error OnlySuperchainTokenBridge();
+
     /// @dev Thrown if the chain is not part of the Superchain cluster
     error NotSuperchain();
 
     /// @dev Thrown if the token is not ERC-7802 compliant
     error InvalidERC7802();
 
-    // @dev Thrown if the caller does not have sufficient allowance
+    // @dev Thrown if the caller does not have sufficient allowance to perform the transferFrom prior to bridging
     error InsufficientAllowance();
 
     modifier onlyCrossDomainMessenger() {
