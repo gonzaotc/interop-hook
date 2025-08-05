@@ -19,9 +19,7 @@ import {Predeploys} from "@optimism/contracts-bedrock/src/libraries/Predeploys.s
 
 // Internals
 import {CrossDomainSelfBridgeable} from "src/CrossDomainSelfBridgeable.sol";
-import {BridgeHooksLib} from "src/BridgeHooksLib.sol";
-import {ISuperchainTokenBridgeHooks} from "src/ISuperchainTokenBridgeHooks.sol";
-import {ISuperchainTokenBridgeHooked} from "src/ISuperchainTokenBridgeHooked.sol";
+import {SuperchainTokenBridge, ISuperchainTokenBridgeExtended, ISuperchainTokenBridgeCallback} from "src/SuperchainTokenBridge.sol";
 
 /// @dev A hook that converts a fragmented one-chain pool into a cross-chain pool in the Superchain cluster,
 /// taking advantage of the 1-block latency to achieve real-time cross-chain swaps.
@@ -51,9 +49,8 @@ import {ISuperchainTokenBridgeHooked} from "src/ISuperchainTokenBridgeHooked.sol
 ///
 /// - Cross-chain messages can be potentially relayed in the wrong order, which can be solved by implementing a
 ///   mechanism for chained asynchronous cross-chain messages such as
-///   https://github.com/ethereum-optimism/interop-lib/blob/main/src/Promise.sol OR
-///   by improving the SuperchainTokenBridge by adding a "sendERC20AndExecute", which would ensure
-///   message execution atomicity and correct order.
+///   https://github.com/ethereum-optimism/interop-lib/blob/main/src/Promise.sol or, by improving the SuperchainTokenBridge
+///   by adding a way to execute a callback after bridging, which would ensure message execution atomicity and correct order.
 ///
 /// - The SuperchainTokenBridge is currently limited in such a way that bridging requests can only be initialized
 ///   by the token holder, therefore, the hook must hold the user token in order to bridge them. Note that this
@@ -63,7 +60,7 @@ import {ISuperchainTokenBridgeHooked} from "src/ISuperchainTokenBridgeHooked.sol
 ///
 /// - We need to figure out how to return the tokens to the user instead of bridging them back to the hook.
 ///
-contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable {
+contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable, ISuperchainTokenBridgeCallback {
     using SafeCast for *;
     using CurrencySettler for Currency;
 
@@ -136,29 +133,25 @@ contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable {
         // take the user's tokens to the hook
         CurrencySettler.take(tokenIn, poolManager, msg.sender, params.amountSpecified.toUint256(), false);
 
-        BridgeHooksLib.HooksData memory hooksData = BridgeHooksLib.HooksData({
-            hooks: BridgeHooksLib.Hooks.AfterRelayERC20,
-            afterRelayERC20Data: abi.encode(CrosschainSwapCallbackData(block.chainid, key, params)),
-            beforeRelayERC20Data: ""
-        });
+        bytes memory callbackData = abi.encode(CrosschainSwapCallbackData(block.chainid, key, params));
 
-        // bridge the input tokens to the canonical chain instance and execute the afterRelayERC20 hook
-        // #cross-domain-message #2
-        ISuperchainTokenBridgeHooked(Predeploys.SUPERCHAIN_TOKEN_BRIDGE).sendERC20Hooked(
-            Currency.unwrap(tokenIn), address(this), params.amountSpecified.toUint256(), CANONICAL_CHAIN_ID, hooksData
+        // bridge the input tokens to the canonical chain instance, including a callback to relayERC20Callback
+        // #cross-domain-message #1
+        ISuperchainTokenBridgeExtended(Predeploys.SUPERCHAIN_TOKEN_BRIDGE).sendERC20(
+            Currency.unwrap(tokenIn), address(this), params.amountSpecified.toUint256(), CANONICAL_CHAIN_ID, callbackData
         );
     }
 
-    /// @notice Called by the SuperchainTokenBridgeHooked after minting tokens in the destination chain.
+    /// @notice Called by the SuperchainTokenBridgeExtended after minting tokens in the destination chain.
     /// @dev Unlocks the pool manager to allow the swap to be performed.
-    function afterRelayERC20(
+    function relayERC20Callback(
         address, /* _token*/
         address, /* _from*/
         address, /* _to*/
         uint256, /* _amount*/
-        bytes calldata _hookData
+        bytes calldata _callbackData
     ) external onlySuperchainTokenBridge {
-        poolManager.unlock(_hookData);
+        poolManager.unlock(_callbackData);
     }
 
     /// @dev Called by the PoolManager to resolve the cross-chain swap request.
