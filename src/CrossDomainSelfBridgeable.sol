@@ -6,6 +6,8 @@ import {IL2ToL2CrossDomainMessenger} from "@optimism/contracts-bedrock/interface
 import {ISuperchainTokenBridge} from "@optimism/contracts-bedrock/interfaces/L2/ISuperchainTokenBridge.sol";
 import {Predeploys} from "@optimism/contracts-bedrock/src/libraries/Predeploys.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {IERC7802} from "@openzeppelin/contracts/interfaces/draft-IERC7802.sol";
 
 contract CrossDomainSelfBridgeable {
     IL2ToL2CrossDomainMessenger public immutable messenger =
@@ -40,28 +42,29 @@ contract CrossDomainSelfBridgeable {
         _;
     }
 
+    modifier onlySuperchainTokenBridge() {
+        if (msg.sender != Predeploys.SUPERCHAIN_TOKEN_BRIDGE) revert OnlySuperchainTokenBridge();
+        _;
+    }
+
     function _validateIsSuperchain() internal view {
         if (Predeploys.L2_TO_L2_CROSS_DOMAIN_MESSENGER.code.length == 0) revert NotSuperchain();
         if (Predeploys.SUPERCHAIN_TOKEN_BRIDGE.code.length == 0) revert NotSuperchain();
     }
 
-    function _validateIsERC7802(address token) internal pure {
-        // TODO: Implement ERC-7802 validation using ERC-165
-        // For now, just ensure it's not zero address
-        if (token == address(0)) {
-            revert InvalidERC7802();
-        }
+    function _validateIsERC7802(address token) internal view {
+        if (!IERC165(token).supportsInterface(type(IERC7802).interfaceId)) revert InvalidERC7802();
     }
 
     // @dev Bridge tokens from this contract to the destination chain
-    function _bridge(address token, address to, uint256 amount, uint256 chainId) internal {
-        ISuperchainTokenBridge(Predeploys.SUPERCHAIN_TOKEN_BRIDGE).sendERC20(token, to, amount, chainId);
-    }
+    // function _bridge(address token, address to, uint256 amount, uint256 chainId) internal {
+    //     ISuperchainTokenBridge(Predeploys.SUPERCHAIN_TOKEN_BRIDGE).sendERC20(token, to, amount, chainId);
+    // }
 
     // @dev Take tokens from the user and bridge them to the destination chain
-    function _takeAndBridge(address token, address to, uint256 amount, uint256 chainId) internal {
-        if (IERC20(token).allowance(to, address(this)) < amount) revert InsufficientAllowance();
-        IERC20(token).transferFrom(to, address(this), amount);
-        _bridge(token, to, amount, chainId);
-    }
+    // function _takeAndBridge(address token, address to, uint256 amount, uint256 chainId) internal {
+    //     if (IERC20(token).allowance(to, address(this)) < amount) revert InsufficientAllowance();
+    //     IERC20(token).transferFrom(to, address(this), amount);
+    //     _bridge(token, to, amount, chainId);
+    // }
 }

@@ -14,10 +14,14 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {CurrencySettler} from "@openzeppelin/uniswap-hooks/utils/CurrencySettler.sol";
+import {ISuperchainTokenBridge} from "@optimism/contracts-bedrock/interfaces/L2/ISuperchainTokenBridge.sol";
+import {Predeploys} from "@optimism/contracts-bedrock/src/libraries/Predeploys.sol";
 
 // Internals
 import {CrossDomainSelfBridgeable} from "src/CrossDomainSelfBridgeable.sol";
-import {BridgeHooks, ISuperchainTokenBridgeHooks} from "src/BridgeHooksLib.sol";
+import {BridgeHooksLib} from "src/BridgeHooksLib.sol";
+import {ISuperchainTokenBridgeHooks} from "src/ISuperchainTokenBridgeHooks.sol";
+import {ISuperchainTokenBridgeHooked} from "src/ISuperchainTokenBridgeHooked.sol";
 
 /// @dev A hook that converts a fragmented one-chain pool into a cross-chain pool in the Superchain cluster,
 /// taking advantage of the 1-block latency to achieve real-time cross-chain swaps.
@@ -59,7 +63,7 @@ import {BridgeHooks, ISuperchainTokenBridgeHooks} from "src/BridgeHooksLib.sol";
 ///
 /// - We need to figure out how to return the tokens to the user instead of bridging them back to the hook.
 ///
-contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable, ISuperchainTokenBridgeHooks {
+contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable {
     using SafeCast for *;
     using CurrencySettler for Currency;
 
@@ -68,6 +72,7 @@ contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable, ISuperchainT
 
     /// @dev The data returned by the PoolManager to resolve a cross-chain swap request.
     struct CrosschainSwapCallbackData {
+        uint256 source;
         PoolKey key;
         SwapParams params;
     }
@@ -87,8 +92,9 @@ contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable, ISuperchainT
     }
 
     /// @inheritdoc BaseHook
-    function _beforeInitialize(address sender, PoolKey calldata key, uint160 sqrtPriceX96)
+    function _beforeInitialize(address, /* sender*/ PoolKey calldata key, uint160 /* sqrtPriceX96 */ )
         internal
+        view
         override
         returns (bytes4)
     {
@@ -100,11 +106,12 @@ contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable, ISuperchainT
     }
 
     /// @inheritdoc BaseHook
-    function _beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)
-        internal
-        override
-        returns (bytes4, BeforeSwapDelta, uint24)
-    {
+    function _beforeSwap(
+        address, /* sender*/
+        PoolKey calldata key,
+        SwapParams calldata params,
+        bytes calldata /* hookData*/
+    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
         if (IS_CANONICAL) {
             // Canonical chain: execute swap normally
             return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
@@ -129,33 +136,33 @@ contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable, ISuperchainT
         // take the user's tokens to the hook
         CurrencySettler.take(tokenIn, poolManager, msg.sender, params.amountSpecified.toUint256(), false);
 
-        bytes memory hookData = abi.encode(CrosschainSwapCallbackData(key, params));
+        BridgeHooksLib.HooksData memory hooksData = BridgeHooksLib.HooksData({
+            hooks: BridgeHooksLib.Hooks.AfterRelayERC20,
+            afterRelayERC20Data: abi.encode(CrosschainSwapCallbackData(block.chainid, key, params)),
+            beforeRelayERC20Data: ""
+        });
 
-        // bridge the input tokens to the canonical chain instance of this hook
-        // #cross-domain-message #1
-        _bridge(
-            Currency.unwrap(tokenIn), address(this), params.amountSpecified.toUint256(), CANONICAL_CHAIN_ID, hookData
+        // bridge the input tokens to the canonical chain instance and execute the afterRelayERC20 hook
+        // #cross-domain-message #2
+        ISuperchainTokenBridgeHooked(Predeploys.SUPERCHAIN_TOKEN_BRIDGE).sendERC20Hooked(
+            Currency.unwrap(tokenIn), address(this), params.amountSpecified.toUint256(), CANONICAL_CHAIN_ID, hooksData
         );
     }
 
+    /// @notice Called by the SuperchainTokenBridgeHooked after minting tokens in the destination chain.
+    /// @dev Unlocks the pool manager to allow the swap to be performed.
     function afterRelayERC20(
-        address _token,
-        address _from,
-        address _to,
-        uint256 _amount,
-        uint256 _source,
+        address, /* _token*/
+        address, /* _from*/
+        address, /* _to*/
+        uint256, /* _amount*/
         bytes calldata _hookData
     ) external onlySuperchainTokenBridge {
-        CrosschainSwapCallbackData memory callbackData = abi.decode(_hookData, (CrosschainSwapCallbackData));
-
-        delta = abi.decode(
-            poolManager.unlock(abi.encode(CrosschainSwapCallbackData(_source, callbackData.key, callbackData.params))),
-            (BalanceDelta)
-        );
+        poolManager.unlock(_hookData);
     }
 
     /// @dev Called by the PoolManager to resolve the cross-chain swap request.
-    function unlockCallback(bytes calldata data) external onlyPoolManager returns (bytes memory) {
+    function unlockCallback(bytes calldata data) external onlyPoolManager {
         CrosschainSwapCallbackData memory callbackData = abi.decode(data, (CrosschainSwapCallbackData));
 
         // perform the swap on the canonical chain
@@ -169,10 +176,10 @@ contract CrosschainPoolHook is BaseHook, CrossDomainSelfBridgeable, ISuperchainT
         // bridge the output tokens back to the origin chain
         // @TBD if we return `tokenOut` directly, we are loosing the slippage protection entirely.
         // @TBD we need to figure out how to return the tokens to the user instead of bridging them back to the hook.
-        // #cross-domain-message #3
-        _bridge(Currency.unwrap(tokenOut), address(this), amountOut.toUint256(), callbackData.originChainId);
-
-        return abi.encode(delta);
+        // #cross-domain-message #2
+        ISuperchainTokenBridge(Predeploys.SUPERCHAIN_TOKEN_BRIDGE).sendERC20(
+            Currency.unwrap(tokenOut), address(this), amountOut.toUint256(), callbackData.source
+        );
     }
 
     // @inheritdoc BaseHook
